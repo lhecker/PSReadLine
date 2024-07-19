@@ -1006,25 +1006,26 @@ namespace Microsoft.PowerShell
                     cellCount = LengthOfLeadingPart;
                     for (; start <= end; start++)
                     {
-                        char ch = tooltip[start];
-                        int charInCells = LengthInBufferCells(ch);
+                        var str = tooltip.Substring(start, end - start);
+                        var res = MeasureForward(str, 0, int.MaxValue, windowWidth - cellCount);
+                        var fit = str.Substring(0, res.Offset);
 
-                        cellCount += charInCells;
-                        if (cellCount > windowWidth)
+                        start += res.Offset;
+                        cellCount += res.Columns;
+                        buff.Append(fit);
+
+                        if (start < end)
                         {
                             linesLeft--;
                             if (linesLeft is -1)
                             {
                                 // More text from the current substring line, but no more space for rendering.
                                 moreToCome = true;
-                                cellCount -= charInCells;
                                 break;
                             }
 
-                            cellCount = charInCells;
+                            cellCount = 0;
                         }
-
-                        buff.Append(ch);
                     }
                 }
                 while (linesLeft >= 0 && newlineIndex >= 0);

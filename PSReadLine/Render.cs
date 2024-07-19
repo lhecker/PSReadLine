@@ -58,47 +58,23 @@ namespace Microsoft.PowerShell
             int y = 1;
             lenLastPhysicalLine = 0;
 
-            for (int i = 0; i < Line.Length; i++)
+            for (int off = 0;;)
             {
-                var c = Line[i];
+                var res = PSConsoleReadLine.MeasureForwardVT(Line, off, int.MaxValue, bufferWidth);
 
-                // Simple escape sequence skipping.
-                if (c == 0x1b && (i + 1) < Line.Length && Line[i + 1] == '[')
+                x += res.Columns;
+                off = res.Offset;
+
+                if (off >= Line.Length)
                 {
-                    i += 2;
-                    while (i < Line.Length && Line[i] != 'm')
-                    {
-                        i++;
-                    }
-
-                    continue;
+                    break;
                 }
 
-                int size = PSConsoleReadLine.LengthInBufferCells(c);
-                if (x == 0 && lenLastPhysicalLine > 0)
-                {
-                    y++;
-                    lenLastPhysicalLine = 0;
-                }
-
-                x += size;
-                lenLastPhysicalLine += size;
-
-                if (x == bufferWidth)
-                {
-                    x = 0;
-                }
-                else if (x > bufferWidth)
-                {
-                    // It could wrap to the next line in case of a multi-cell character.
-                    // If character didn't fit on current line, it will move entirely to the next line.
-                    x = size;
-                    y++;
-                    lenLastPhysicalLine = size;
-                }
+                y++;
+                x = 0;
             }
 
-            _lengthOfLastPhsicalLine = lenLastPhysicalLine;
+            _lengthOfLastPhsicalLine = x;
             _physicalLineCount = y;
 
             return y;
@@ -1181,50 +1157,46 @@ namespace Microsoft.PowerShell
 
         internal Point ConvertOffsetToPoint(int offset)
         {
+            var str = _buffer.ToString(0, Math.Min(offset, _buffer.Length));
             int x = _initialX;
             int y = _initialY;
 
             int bufferWidth = _console.BufferWidth;
             var continuationPromptLength = LengthInBufferCells(Options.ContinuationPrompt);
 
-            for (int i = 0; i < offset; i++)
+            for (int off = 0; off < str.Length; )
             {
-                char c = _buffer[i];
-                if (c == '\n')
+                var newlineBegin = str.IndexOf('\n', off);
+                if (newlineBegin < 0)
                 {
-                    y += 1;
-                    x = continuationPromptLength;
+                    newlineBegin = str.Length;
                 }
-                else
+
+                var line = str.Substring(off, newlineBegin - off);
+
+                for (int o = 0;;)
                 {
-                    int size = LengthInBufferCells(c);
-                    x += size;
-                    // Wrap?  No prompt when wrapping
-                    if (x >= bufferWidth)
+                    var res = MeasureForward(line, o, int.MaxValue, bufferWidth);
+                    x += res.Columns;
+                    o = res.Offset;
+
+                    if (o == str.Length)
                     {
-                        // If character didn't fit on current line, it will move entirely to the next line.
-                        x = ((x == bufferWidth) ? 0 : size);
-
-                        // If cursor is at column 0 and the next character is newline, let the next loop
-                        // iteration increment y.
-                        if (x != 0 || !(i + 1 < offset && _buffer[i + 1] == '\n'))
-                        {
-                            y += 1;
-                        }
+                        break;
                     }
-                }
-            }
 
-            // If next character actually exists, and isn't newline, check if wider than the space left on the current line.
-            if (_buffer.Length > offset && _buffer[offset] != '\n')
-            {
-                int size = LengthInBufferCells(_buffer[offset]);
-                if (x + size > bufferWidth)
-                {
-                    // Character was wider than remaining space, so character, and cursor, appear on next line.
+                    y += 1;
                     x = 0;
-                    y++;
                 }
+
+                if (newlineBegin == str.Length)
+                {
+                    break;
+                }
+
+                off = newlineBegin + 1;
+                y += 1;
+                x = continuationPromptLength;
             }
 
             return new Point {X = x, Y = y};
@@ -1232,55 +1204,65 @@ namespace Microsoft.PowerShell
 
         private int ConvertLineAndColumnToOffset(Point point)
         {
-            int offset;
+            var str = _buffer.ToString();
+            int offset = 0;
             int x = _initialX;
             int y = _initialY;
 
             int bufferWidth = _console.BufferWidth;
             var continuationPromptLength = LengthInBufferCells(Options.ContinuationPrompt);
-            for (offset = 0; offset < _buffer.Length; offset++)
+
+            while (offset < str.Length)
             {
-                // If we are on the correct line, return when we find
-                // the correct column
-                if (point.Y == y && point.X <= x)
+                var newlineBegin = str.IndexOf('\n', offset);
+                if (newlineBegin < 0)
+                {
+                    newlineBegin = str.Length;
+                }
+
+                var line = str.Substring(offset, newlineBegin - offset);
+                var off = 0;
+
+                while (off < line.Length && y < point.Y)
+                {
+                    var res = MeasureForward(line, off, int.MaxValue, bufferWidth);
+                    off = res.Offset;
+                    y += 1;
+                    x = 0;
+                }
+
+                if (y >= point.Y)
+                {
+                    return -1;
+                }
+
+                if (y == point.Y)
+                {
+                    var res = MeasureForward(line, off, int.MaxValue, point.X);
+                    x += res.Columns;
+
+                    if (x >= point.X)
+                    {
+                        return offset + res.Offset;
+                    }
+                }
+
+                if (newlineBegin == str.Length)
+                {
+                    return -1;
+                }
+
+                offset = newlineBegin + 1;
+                y += 1;
+                x = continuationPromptLength;
+
+                if (y == point.Y && x >= point.X)
                 {
                     return offset;
                 }
-                char c = _buffer[offset];
-                if (c == '\n')
-                {
-                    // If we are about to move off of the correct line,
-                    // the line was shorter than the column we wanted so return.
-                    if (point.Y == y)
-                    {
-                        return offset;
-                    }
-                    y += 1;
-                    x = continuationPromptLength;
-                }
-                else
-                {
-                    int size = LengthInBufferCells(c);
-                    x += size;
-                    // Wrap?  No prompt when wrapping
-                    if (x >= bufferWidth)
-                    {
-                        // If character didn't fit on current line, it will move entirely to the next line.
-                        x = ((x == bufferWidth) ? 0 : size);
-
-                        // If cursor is at column 0 and the next character is newline, let the next loop
-                        // iteration increment y.
-                        if (x != 0 || !(offset + 1 < _buffer.Length && _buffer[offset + 1] == '\n'))
-                        {
-                            y += 1;
-                        }
-                    }
-                }
             }
 
-            // Return -1 if y is out of range, otherwise the last line was shorter
-            // than we wanted, but still in range so just return the last offset.
-            return (point.Y == y) ? offset : -1;
+            return -1;
         }
 
         internal Point ConvertRenderDataOffsetToPoint(int initialX, int initialY, int bufferWidth, RenderData renderData, RenderDataOffset offset)
@@ -1356,56 +1338,23 @@ namespace Microsoft.PowerShell
                 }
             }
 
-            int visibleCharIndex = -1, size = 0;
             string line = renderData.lines[limit].Line;
-            for (int i = 0; i < line.Length; i++)
+            var off = 0;
+            var remaining = offset.VisibleCharIndex;
+
+            while (off < line.Length)
             {
-                var c = line[i];
-
-                // Simple escape sequence skipping.
-                if (c == 0x1b && (i + 1) < line.Length && line[i + 1] == '[')
-                {
-                    i += 2;
-                    while (i < line.Length && line[i] != 'm')
-                    {
-                        i++;
-                    }
-
-                    continue;
-                }
-
-                visibleCharIndex++;
-                size = LengthInBufferCells(c);
-
-                if (visibleCharIndex == offset.VisibleCharIndex)
+                var res = MeasureForwardVT(line, off, int.MaxValue, bufferWidth);
+                if (res.CursorMovements >= remaining)
                 {
                     break;
                 }
-
-                x += size;
-                if (x == bufferWidth)
-                {
-                    x = 0;
-                    y++;
-                }
-                else if (x > bufferWidth)
-                {
-                    // It could wrap to the next line in case of a multi-cell character.
-                    // If character didn't fit on current line, it will move entirely to the next line.
-                    x = size;
-                    y++;
-                }
-            }
-
-            // If the offset is pointing to a double-cell character that happens to be wrapped to the next physical line,
-            // then we move 'x' and 'y' to the start of the next physical line, so the new cursor continues to point to
-            // that specific character.
-            if (x + size > bufferWidth)
-            {
-                x = 0;
+                off = res.Offset;
+                remaining -= res.CursorMovements;
                 y++;
             }
 
+            x = MeasureForwardVT(line, off, remaining).Columns;
             return new Point { X = x, Y = y };
         }
 
@@ -1515,58 +1464,37 @@ namespace Microsoft.PowerShell
             }
 
             // Now we will scan the current logical line to find which character the cursor was pointing at.
-            int visibleCharIndex = 0;
             string line = renderData.lines[logicalLineIndex].Line;
+            var offset = 0;
+            var cursorMovements = 0;
 
-            for (int i = 0; i < line.Length; i++)
+            while (y < point.Y && offset < line.Length)
             {
-                var c = line[i];
+                var res = MeasureForwardVT(line, offset, int.MaxValue, bufferWidth);
+                offset = res.Offset;
+                cursorMovements += res.CursorMovements;
+                y++;
+            }
 
-                // Simple escape sequence skipping.
-                if (c == 0x1b && (i + 1) < line.Length && line[i + 1] == '[')
+            if (y == point.Y)
+            {
+                var res = MeasureForwardVT(line, offset, int.MaxValue, point.X);
+                var col = res.Columns;
+                offset = res.Offset;
+
+                if (res.Columns < point.X && offset < line.Length)
                 {
-                    i += 2;
-                    while (i < line.Length && line[i] != 'm')
-                    {
-                        i++;
-                    }
+                    // Wide char detected!
+                    res = MeasureForwardVT(line, offset, int.MaxValue, 2);
+                    col += res.Columns;
+                    cursorMovements += res.CursorMovements;
 
-                    continue;
                 }
 
-                int size = LengthInBufferCells(c);
-                x += size;
-
-                if (x == bufferWidth)
+                if (col >= point.X)
                 {
-                    x = 0;
-                    y++;
+                    return new RenderDataOffset(logicalLineIndex, cursorMovements);
                 }
-                else if (x > bufferWidth)
-                {
-                    // It could wrap to the next line in case of a multi-cell character.
-                    // If character didn't fit on current line, it will move entirely to the next line.
-                    x = size;
-                    y++;
-                }
-
-                if (point.Y == y)
-                {
-                    if (point.X < x)
-                    {
-                        // This could happen when the cursor was pointing to a double-cell character
-                        // that was wrapped to the next physical line -- because there was only one
-                        // cell space left at the end of the previous physical line.
-                        return new RenderDataOffset(logicalLineIndex, visibleCharIndex);
-                    }
-                    else if (point.X == x)
-                    {
-                        // 'x' is pointing to where the next visible character would be rendered.
-                        return new RenderDataOffset(logicalLineIndex, visibleCharIndex + 1);
-                    }
-                }
-
-                visibleCharIndex++;
             }
 
             // We should never reach here in theory.
